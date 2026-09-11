@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 import useSWR from 'swr'
+import { App } from '@capacitor/app'
+import { apiFetch, isNative, requestNativeMicrophone } from '@/lib/platform'
+import { createRecorder, microphoneError, supportedAudioType } from '@/lib/audio'
 
 export type InputLanguage = 'ta' | 'en' | 'mix'
 export type ReplyLanguage = 'ta' | 'en'
@@ -15,7 +18,7 @@ type Recognition = {
   onend: (() => void) | null;
 }
 type SpeechWindow = Window & { SpeechRecognition?: new () => Recognition; webkitSpeechRecognition?: new () => Recognition }
-const fetcher = async (url: string) => { const res = await fetch(url); if (!res.ok) throw new Error('Cannot check cloud availability'); return res.json() }
+const fetcher = async (url: `/api/${string}`) => { const res = await apiFetch(url); if (!res.ok) throw new Error('Cannot check cloud availability'); return res.json() }
 async function responseError(response: Response) { try { return (await response.json()).error || 'Please try again.' } catch { return 'The service is unavailable. Please try again.' } }
 
 export function useVoiceSession() {
@@ -36,7 +39,12 @@ export function useVoiceSession() {
   const [playingId, setPlayingId] = useState<string | null>(null)
   const [cloudInputFailed, setCloudInputFailed] = useState(false)
   const [cloudOutputFailed, setCloudOutputFailed] = useState(false)
-  const { data: capabilities, isLoading: checkingCloud } = useSWR<{ transcription: boolean; speech: boolean; note: string }>('/api/capabilities', fetcher, { revalidateOnFocus: false, shouldRetryOnError: false })
+  const [online, setOnline] = useState(true)
+  const [browserInputFailed, setBrowserInputFailed] = useState(false)
+  const [preparedId, setPreparedId] = useState<string | null>(null)
+  const [fallbackInput, setFallbackInput] = useState<'cloud' | 'browser' | null>(null)
+  const captureBusy = useRef(false)
+  const { data: capabilities, isLoading: checkingCloud, error: capabilityError, mutate: refreshCapabilities } = useSWR<{ transcription: boolean; speech: boolean; note: string }>('/api/capabilities', fetcher, { revalidateOnFocus: false, shouldRetryOnError: false })
   const resources = useRef<{ recorder?: MediaRecorder; stream?: MediaStream; recognition?: Recognition; audio?: HTMLAudioElement; url?: string; utterance?: SpeechSynthesisUtterance; timer?: ReturnType<typeof setInterval>; limit?: ReturnType<typeof setTimeout>; recordAbort?: AbortController; chatAbort?: AbortController; audioAbort?: AbortController }>({})
   const session = useRef(0)
   const playback = useRef(0)
@@ -51,11 +59,12 @@ export function useVoiceSession() {
     if (resources.current.url) URL.revokeObjectURL(resources.current.url)
     resources.current.audio = undefined; resources.current.url = undefined
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
-    setPlayingId(null)
+    setPlayingId(null); setPreparedId(null)
+    resources.current.utterance = undefined
     setStatus(current => current === 'speaking' || current === 'loading-audio' ? 'idle' : current)
   }
   function cancelRecording() {
-    recording.current++
+    recording.current++; captureBusy.current = false
     clearTimers()
     resources.current.recordAbort?.abort()
     resources.current.recognition?.abort()
@@ -69,12 +78,26 @@ export function useVoiceSession() {
   useEffect(() => {
     const w = window as SpeechWindow
     setBrowserInput(!!(w.SpeechRecognition || w.webkitSpeechRecognition))
-    setCanRecord(!!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined')
+    setCanRecord(window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined')
+    const updateOnline = () => setOnline(navigator.onLine)
+    updateOnline()
+    window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline)
+    const suspend = () => { stopGeneration(); cancelRecording(); stopAudio() }
+    const onVisibility = () => { if (document.hidden) suspend() }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', suspend)
+    const nativeListeners = isNative() ? [
+      App.addListener('appStateChange', ({ isActive }) => { if (!isActive) suspend() }),
+      App.addListener('backButton', () => { suspend(); void App.minimizeApp() }),
+    ] : []
     const updateVoices = () => setVoices(window.speechSynthesis?.getVoices() ?? [])
     updateVoices()
     window.speechSynthesis?.addEventListener('voiceschanged', updateVoices)
     const resource = resources.current
     return () => {
+      window.removeEventListener('online', updateOnline); window.removeEventListener('offline', updateOnline)
+      document.removeEventListener('visibilitychange', onVisibility); window.removeEventListener('pagehide', suspend)
+      nativeListeners.forEach(listener => { void listener.then(handle => handle.remove()).catch(() => {}) })
       session.current++; playback.current++; recording.current++
       clearInterval(resource.timer); clearTimeout(resource.limit)
       resource.chatAbort?.abort(); resource.audioAbort?.abort(); resource.recordAbort?.abort()
@@ -89,54 +112,88 @@ export function useVoiceSession() {
   }, [])
 
   const matchingVoice = (language: ReplyLanguage) => voices.find(voice => voice.lang.toLowerCase().startsWith(language))
-  const inputEngine = engine === 'auto' ? capabilities?.transcription && canRecord && !cloudInputFailed ? 'cloud' : browserInput ? 'browser' : 'cloud' : engine
+  const inputEngine = engine === 'auto' ? canRecord && !cloudInputFailed && (isNative() || capabilities?.transcription || browserInputFailed || !browserInput) ? 'cloud' : browserInput && !browserInputFailed ? 'browser' : 'cloud' : engine
+  function retryCloud() { setCloudInputFailed(false); setCloudOutputFailed(false); setBrowserInputFailed(false); setFallbackInput(null); void refreshCapabilities() }
   const outputEngine = engine === 'auto' ? capabilities?.speech && !cloudOutputFailed ? 'cloud' : matchingVoice(replyLanguage) ? 'browser' : 'cloud' : engine
 
+  function playPrepared() {
+    const audio = resources.current.audio
+    if (!audio || !preparedId) return
+    const token = playback.current
+    // Invoke play synchronously in the tap handler so Safari retains user activation.
+    const result = audio.play()
+    void result.then(() => {
+      if (token !== playback.current) return
+      setPlayingId(preparedId); setPreparedId(null); setStatus('speaking'); setNotice('')
+    }).catch(() => { if (token === playback.current) setNotice('Playback is still blocked. Check sound permissions or read the reply.') })
+  }
+
   async function speak(message: ChatMessage) {
+    if (captureBusy.current || sending.current) return
+    if (preparedId === message.id && resources.current.audio) { playPrepared(); return }
     stopAudio()
     if (!message.content || !message.complete) return
     const token = playback.current
-    setNotice('')
-    setPlayingId(message.id)
-    setStatus('loading-audio')
-    const browserSpeak = () => {
-      const voice = matchingVoice(message.language)
-      if (!voice || !('speechSynthesis' in window)) throw new Error(`No ${message.language === 'ta' ? 'Tamil' : 'English'} browser voice is installed. Try Cloud speech in Voice settings; your text reply is still available.`)
-      const utterance = new SpeechSynthesisUtterance(message.content)
-      resources.current.utterance = utterance
-      utterance.voice = voice; utterance.lang = voice.lang; utterance.rate = speed
-      utterance.onend = () => { if (token === playback.current) { setStatus('idle'); setPlayingId(null) } }
-      utterance.onerror = event => { if (token === playback.current && event.error !== 'canceled' && event.error !== 'interrupted') { setNotice('Playback could not start. Tap the reply’s play button to try again.'); setStatus('idle'); setPlayingId(null) } }
-      setActiveEngine('Browser voice'); setStatus('speaking')
-      window.speechSynthesis.speak(utterance)
+    setNotice(''); setPlayingId(message.id); setStatus('loading-audio')
+    const attempted = new Set<string>()
+    const failed = (error: unknown) => {
+      if (token !== playback.current) return
+      stopAudio(); setNotice(error instanceof Error ? error.message : 'Voice playback is unavailable. Your text reply is still here.')
+    }
+    const run = async (selected: 'cloud' | 'browser'): Promise<void> => {
+      if (token !== playback.current || attempted.has(selected)) return
+      attempted.add(selected)
+      const fallback = async (error: unknown) => {
+        if (token !== playback.current) return
+        if (selected === 'cloud') setCloudOutputFailed(true)
+        const next = selected === 'cloud' ? 'browser' : 'cloud'
+        if (engine === 'auto' && !attempted.has(next) && (next === 'cloud' ? navigator.onLine : !!matchingVoice(message.language))) {
+          resources.current.audio?.pause()
+          if (resources.current.url) URL.revokeObjectURL(resources.current.url)
+          resources.current.audio = undefined; resources.current.url = undefined
+          setNotice(`${selected === 'cloud' ? 'Cloud' : 'Browser'} voice failed. Trying ${next} voice.`)
+          await run(next)
+        } else failed(error)
+      }
+      try {
+        if (selected === 'browser') {
+          const voice = matchingVoice(message.language)
+          if (!voice || typeof SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) throw new Error('No matching browser voice is installed. Choose Cloud speech or read the reply.')
+          const utterance = new SpeechSynthesisUtterance(message.content)
+          resources.current.utterance = utterance
+          utterance.voice = voice; utterance.lang = voice.lang; utterance.rate = speed
+          utterance.onend = () => { if (token === playback.current) stopAudio() }
+          utterance.onerror = event => { if (event.error !== 'canceled' && event.error !== 'interrupted') void fallback(new Error('Browser voice failed. Tap play to retry or choose another engine.')) }
+          setActiveEngine('Browser voice'); setStatus('speaking')
+          window.speechSynthesis.speak(utterance)
+          return
+        }
+        const abort = new AbortController(); resources.current.audioAbort = abort
+        const response = await apiFetch('/api/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message.content, language: message.language, speed }), signal: abort.signal })
+        if (!response.ok) throw new Error(await responseError(response))
+        const blob = await response.blob()
+        if (token !== playback.current) return
+        if (!blob.size) throw new Error('No audio was returned.')
+        const url = URL.createObjectURL(blob)
+        const audio = new Audio(url)
+        resources.current.audio = audio; resources.current.url = url
+        audio.onended = () => { if (token === playback.current) stopAudio() }
+        audio.onerror = () => { void fallback(new Error('The audio format could not be played.')) }
+        setActiveEngine('Cloud voice')
+        try {
+          await audio.play()
+          if (token === playback.current) setStatus('speaking')
+        } catch (error) {
+          if (token !== playback.current) return
+          if (error instanceof DOMException && error.name === 'NotAllowedError') {
+            setPreparedId(message.id); setPlayingId(null); setStatus('idle')
+            setNotice('Audio is ready. Tap Play prepared audio to allow sound; no new request is needed.')
+          } else throw error
+        }
+      } catch (error) { await fallback(error) }
     }
     const selected = engine === 'auto' ? capabilities?.speech && !cloudOutputFailed ? 'cloud' : matchingVoice(message.language) ? 'browser' : 'cloud' : engine
-    try {
-      if (selected === 'browser') { browserSpeak(); return }
-      const abort = new AbortController(); resources.current.audioAbort = abort
-      let response: Response
-      try {
-        response = await fetch('/api/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message.content, language: message.language, speed }), signal: abort.signal })
-        if (!response.ok) throw new Error(await responseError(response))
-      } catch (error) {
-        if (token !== playback.current) return
-        setCloudOutputFailed(true)
-        if (engine === 'auto' && matchingVoice(message.language)) { setNotice('Cloud voice is unavailable. Playing with a browser voice instead.'); browserSpeak(); return }
-        throw error
-      }
-      const blob = await response.blob()
-      if (token !== playback.current) return
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      resources.current.audio = audio; resources.current.url = url
-      audio.onended = () => { if (token === playback.current) { stopAudio(); setStatus('idle') } }
-      audio.onerror = () => { if (token === playback.current) { stopAudio(); setNotice('Audio playback failed. Please try the play button again.') } }
-      setActiveEngine('Cloud voice'); setStatus('speaking')
-      try { await audio.play() } catch { throw new Error('Your browser blocked automatic audio. Tap the reply’s play button to listen.') }
-    } catch (error) {
-      if (token !== playback.current) return
-      stopAudio(); setStatus('idle'); setNotice(error instanceof Error ? error.message : 'Voice playback is unavailable.')
-    }
+    await run(selected)
   }
 
   function finishRecording() {
@@ -146,9 +203,11 @@ export function useVoiceSession() {
     resources.current.stream?.getTracks().forEach(track => track.stop())
   }
 
-  async function startRecording() {
-    if (sending.current) return
-    stopAudio(); setNotice(''); setSeconds(0)
+  async function startRecording(override?: 'cloud' | 'browser') {
+    if (sending.current || captureBusy.current) return
+    captureBusy.current = true
+    const selectedInput = override ?? inputEngine
+    stopAudio(); setNotice(''); setSeconds(0); setFallbackInput(null); setStatus('requesting')
     const token = ++recording.current
     const existing = draft.trim()
     const applyTranscript = (text: string) => setDraft([existing, text].filter(Boolean).join(' ').slice(0, 3000))
@@ -158,7 +217,10 @@ export function useVoiceSession() {
       resources.current.limit = setTimeout(finishRecording, 30_000)
     }
     try {
-      if (inputEngine === 'browser') {
+      if (selectedInput === 'cloud' && !navigator.onLine) throw new Error('Cloud recording needs a connection. Your draft remains available for editing.')
+      await requestNativeMicrophone()
+      if (token !== recording.current) return
+      if (selectedInput === 'browser') {
         const w = window as SpeechWindow
         const Constructor = w.SpeechRecognition || w.webkitSpeechRecognition
         if (!Constructor) throw new Error('This browser does not support speech recognition. Choose Cloud speech or type instead.')
@@ -172,10 +234,13 @@ export function useVoiceSession() {
         }
         recognition.onerror = event => {
           if (token !== recording.current) return
-          clearTimers(); setStatus('idle')
+          recording.current++; captureBusy.current = false
+          recognition.abort(); resources.current.recognition = undefined
+          clearTimers(); setStatus('idle'); setBrowserInputFailed(true)
+          if (engine === 'auto' && canRecord && !['not-allowed', 'service-not-allowed'].includes(event.error)) setFallbackInput('cloud')
           setNotice(event.error === 'not-allowed' ? 'Microphone permission was denied. Allow microphone access in your browser, or type below. Embedded previews may require opening the app in a new tab.' : 'Browser recognition could not hear you. Try again, switch to Cloud speech, or type your message.')
         }
-        recognition.onend = () => { if (token === recording.current) { clearTimers(); setStatus('idle'); resources.current.recognition = undefined } }
+        recognition.onend = () => { if (token === recording.current) { captureBusy.current = false; clearTimers(); setStatus('idle'); resources.current.recognition = undefined } }
         recognition.start(); setStatus('listening'); setActiveEngine('Browser recognition'); beginTimer(); return
       }
       if (!canRecord) throw new Error('Microphone recording is unavailable here. Use a recent browser over HTTPS, or type your message.')
@@ -183,9 +248,7 @@ export function useVoiceSession() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
       if (token !== recording.current) { stream.getTracks().forEach(track => track.stop()); return }
       resources.current.stream = stream
-      const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'].find(type => MediaRecorder.isTypeSupported(type))
-      if (!mimeType) throw new Error('This browser cannot record a supported format. Try Browser speech or type instead.')
-      const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64000 })
+      const recorder = createRecorder(stream)
       resources.current.recorder = recorder
       const chunks: Blob[] = []
       let size = 0
@@ -196,26 +259,32 @@ export function useVoiceSession() {
         if (token !== recording.current) return
         setStatus('transcribing')
         try {
+          const mimeType = recorder.mimeType || chunks.find(chunk => chunk.type)?.type || ''
+          if (!supportedAudioType(mimeType)) throw new Error('This browser recorded an unsupported format. Try Browser speech or type instead.')
           const blob = new Blob(chunks, { type: mimeType })
+          if (blob.size < 100) throw new Error('No audio was captured. Check your microphone and record again.')
           if (blob.size > 3_000_000) throw new Error('The recording is too large. Please record a shorter message.')
           const abort = new AbortController(); resources.current.recordAbort = abort
-          const response = await fetch('/api/transcribe', { method: 'POST', body: blob, headers: { 'Content-Type': mimeType, 'X-Input-Language': inputLanguage }, signal: abort.signal })
+          const response = await apiFetch('/api/transcribe', { method: 'POST', body: blob, headers: { 'Content-Type': mimeType, 'X-Input-Language': inputLanguage }, signal: abort.signal })
           if (!response.ok) { if (response.status >= 500) setCloudInputFailed(true); throw new Error(await responseError(response)) }
           const data = await response.json()
           if (token === recording.current) { applyTranscript(data.text); setStatus('idle'); setNotice('Transcript ready. Review it below, then send.') }
-        } catch (error) { if (token === recording.current) { setStatus('idle'); setNotice(error instanceof Error ? error.message : 'Transcription failed. Please try again.') } }
+        } catch (error) { if (token === recording.current) { setStatus('idle'); setCloudInputFailed(true); if (engine === 'auto' && browserInput) setFallbackInput('browser'); setNotice(error instanceof Error ? error.message : 'Transcription failed. Please try again.') } }
+        finally { if (token === recording.current) captureBusy.current = false }
       }
       recorder.start(1000); setStatus('listening'); setActiveEngine('Cloud transcription'); beginTimer()
     } catch (error) {
       if (token !== recording.current) return
+      captureBusy.current = false
       clearTimers(); resources.current.stream?.getTracks().forEach(track => track.stop()); setStatus('idle')
-      setNotice(error instanceof DOMException && error.name === 'NotAllowedError' ? 'Allow microphone access in your browser to start. If you are in an embedded preview, open the app in a new tab. You can always type instead.' : error instanceof Error ? error.message : 'Microphone access failed. You can type instead.')
+      setNotice(microphoneError(error))
     }
   }
 
   async function send() {
     const text = draft.trim()
-    if (!text || sending.current || ['listening', 'requesting', 'transcribing'].includes(status)) return
+    if (!text || sending.current || captureBusy.current) return
+    if (!navigator.onLine) { setNotice('You are offline. Reconnect to send; your draft is still here.'); return }
     stopAudio(); setNotice(''); sending.current = true
     const token = ++session.current
     const user: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: text, language: replyLanguage, complete: true }
@@ -225,7 +294,7 @@ export function useVoiceSession() {
     const abort = new AbortController(); resources.current.chatAbort = abort
     let answer = ''; let finished = false
     try {
-      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: replyLanguage, messages: history.map(({ role, content }) => ({ role, content })) }), signal: abort.signal })
+      const response = await apiFetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: replyLanguage, messages: history.map(({ role, content }) => ({ role, content })) }), signal: abort.signal })
       if (!response.ok) throw new Error(await responseError(response))
       const reader = response.body?.getReader()
       if (!reader) throw new Error('No reply was received.')
@@ -234,7 +303,7 @@ export function useVoiceSession() {
         const { value, done } = await reader.read()
         if (token !== session.current) return
         pending += done ? decoder.decode() : decoder.decode(value, { stream: true })
-        const lines = pending.split('\n'); pending = lines.pop() ?? ''
+        const lines = pending.split('\n'); pending = done ? '' : lines.pop() ?? ''
         for (const line of lines) {
           if (!line) continue
           const event = JSON.parse(line)
@@ -258,7 +327,7 @@ export function useVoiceSession() {
     } finally { if (token === session.current) sending.current = false }
   }
 
-  return { inputLanguage, setInputLanguage, replyLanguage, setReplyLanguage, engine, setEngine, autoPlay, setAutoPlay, speed, setSpeed, draft, setDraft, messages, status, notice, setNotice, browserInput, canRecord, voices, seconds, activeEngine, playingId, capabilities, checkingCloud, inputEngine, outputEngine, cloudInputFailed, cloudOutputFailed, send, speak, startRecording, finishRecording, cancelRecording, stopAudio, stopGeneration, reset }
+  return { online, capabilityError, retryCloud, preparedId, playPrepared, fallbackInput, inputLanguage, setInputLanguage, replyLanguage, setReplyLanguage, engine, setEngine, autoPlay, setAutoPlay, speed, setSpeed, draft, setDraft, messages, status, notice, setNotice, browserInput, canRecord, voices, seconds, activeEngine, playingId, capabilities, checkingCloud, inputEngine, outputEngine, cloudInputFailed, cloudOutputFailed, send, speak, startRecording, finishRecording, cancelRecording, stopAudio, stopGeneration, reset }
 }
 
 export type VoiceSession = ReturnType<typeof useVoiceSession>

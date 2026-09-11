@@ -24,6 +24,11 @@ export function VoiceChat() {
         <Dialog><DialogTrigger render={<Button variant="outline" />}><Plus data-icon="inline-start" />New conversation</DialogTrigger><DialogContent><DialogHeader><DialogTitle>Start fresh?</DialogTitle><DialogDescription>This clears the current conversation and any draft. Nothing is saved, so this cannot be undone.</DialogDescription></DialogHeader><DialogFooter><DialogClose render={<Button variant="outline" />}>Keep chatting</DialogClose><DialogClose render={<Button onClick={voice.reset} />}>Start new conversation</DialogClose></DialogFooter></DialogContent></Dialog>
       </div>
       {voice.notice && <Alert><Info /><AlertDescription>{voice.notice}</AlertDescription><AlertAction><Button variant="ghost" size="icon-sm" onClick={() => voice.setNotice('')} aria-label="Dismiss notification"><X /></Button></AlertAction></Alert>}
+      {(!voice.online || voice.capabilityError) && <Alert><Info /><AlertDescription>{!voice.online ? 'You are offline. You can edit your draft, but cloud services need a connection. Drafts are not saved after closing the app.' : 'Backend availability could not be checked. Check your connection or retry.'}<Button variant="outline" disabled={!voice.online} onClick={voice.retryCloud}>Retry connection</Button></AlertDescription></Alert>}
+      {(voice.preparedId || voice.fallbackInput) && <div className="flex flex-wrap gap-3">
+        {voice.preparedId && <Button onClick={voice.playPrepared}>Play prepared audio</Button>}
+        {voice.fallbackInput && <Button variant="outline" disabled={voice.status !== 'idle'} onClick={() => void voice.startRecording(voice.fallbackInput ?? undefined)}>Record again with {voice.fallbackInput} speech</Button>}
+      </div>}
       <div className="grid min-w-0 grid-cols-1 gap-5 lg:grid-cols-2"><VoicePanel voice={voice} /><ConversationPanel voice={voice} /></div>
       <div className="flex flex-wrap items-start justify-between gap-5"><ConversationStarters onSelect={text => { if (voice.status === 'idle' || voice.status === 'speaking') { voice.setDraft(text); document.getElementById('message')?.focus() } }} /><div className="flex items-center gap-2 text-sm text-muted-foreground"><span className="size-1.5 rounded-full bg-primary" /><span>{voice.activeEngine || `Input: ${voice.inputEngine} · Voice: ${voice.outputEngine}`}</span></div></div>
     </main>

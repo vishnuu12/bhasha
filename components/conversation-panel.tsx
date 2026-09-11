@@ -16,12 +16,12 @@ export function ConversationPanel({ voice }: { voice: VoiceSession }) {
   const [copied, setCopied] = useState<string | null>(null)
   const busy = ['thinking', 'requesting', 'listening', 'transcribing'].includes(voice.status)
   async function copy(id: string, text: string) {
-    try { await navigator.clipboard.writeText(text); setCopied(id) }
+    try { if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable'); await navigator.clipboard.writeText(text); setCopied(id) }
     catch { voice.setNotice('Clipboard access is unavailable. You can select and copy the reply text instead.') }
   }
   return (
     <section className="flex h-[510px] min-w-0 flex-col overflow-hidden rounded-2xl border bg-card text-card-foreground lg:h-auto" aria-labelledby="conversation-heading">
-      <div className="flex items-center justify-between gap-3 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
         <h2 id="conversation-heading" className="flex items-center gap-2 text-sm font-medium"><MessageCircle className="size-4 text-primary" /> Conversation</h2>
         <div className="flex items-center gap-2"><Volume2 className="size-4 text-muted-foreground" /><label htmlFor="auto-play" className="text-sm text-muted-foreground">Auto-play</label><Switch id="auto-play" checked={voice.autoPlay} onCheckedChange={checked => { voice.setAutoPlay(checked); if (!checked) voice.stopAudio() }} /></div>
       </div>
@@ -37,7 +37,7 @@ export function ConversationPanel({ voice }: { voice: VoiceSession }) {
           {voice.messages.map(message => <MessageScrollerItem key={message.id} messageId={message.id} scrollAnchor={message.role === 'user'}>
             <Message align={message.role === 'user' ? 'end' : 'start'}><MessageContent>
               <MessageHeader className="text-sm">{message.role === 'user' ? 'You' : 'Mozhi'}</MessageHeader>
-              <Bubble variant={message.role === 'user' ? 'secondary' : 'ghost'}><BubbleContent className="whitespace-pre-wrap leading-relaxed" lang={message.role === 'assistant' ? message.language : undefined}>
+              <Bubble variant={message.role === 'user' ? 'secondary' : 'ghost'}><BubbleContent className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] leading-relaxed" lang={message.role === 'assistant' ? message.language : undefined}>
                 {message.content || (voice.status === 'thinking' ? <span className="flex items-center gap-2"><LoaderCircle className="size-4 motion-safe:animate-spin" /> Thinking…</span> : 'Reply stopped.')}
               </BubbleContent></Bubble>
               {message.role === 'assistant' && message.content && <MessageFooter className="gap-1 text-sm">
