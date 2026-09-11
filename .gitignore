@@ -12,4 +12,9 @@ __v0_jsx-dev-runtime.ts
 # Common ignores
 node_modules
 .next/
+.mobile-build/
+public/sw.js
+*.tsbuildinfo
+*.jks
+*.keystore
 .DS_Store

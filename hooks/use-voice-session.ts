@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react'
 import useSWR from 'swr'
 import { App } from '@capacitor/app'
-import { apiFetch, isNative, requestNativeMicrophone } from '@/lib/platform'
+import { apiFetch, isNative, isNativeAndroid, MicrophoneDeniedError, openMicrophoneSettings, requestNativeMicrophone } from '@/lib/platform'
+import { selectInputEngine, selectOutputEngine } from '@/lib/speech-policy'
 import { createRecorder, microphoneError, supportedAudioType } from '@/lib/audio'
 
 export type InputLanguage = 'ta' | 'en' | 'mix'
@@ -32,6 +33,9 @@ export function useVoiceSession() {
   const [status, setStatus] = useState<'idle' | 'requesting' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'loading-audio'>('idle')
   const [notice, setNotice] = useState('')
   const [browserInput, setBrowserInput] = useState(false)
+  const [nativeAndroid, setNativeAndroid] = useState(false)
+  const [permissionDenied, setPermissionDenied] = useState(false)
+  const nativePermissionPending = useRef(false)
   const [canRecord, setCanRecord] = useState(false)
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
   const [seconds, setSeconds] = useState(0)
@@ -77,12 +81,17 @@ export function useVoiceSession() {
 
   useEffect(() => {
     const w = window as SpeechWindow
-    setBrowserInput(!!(w.SpeechRecognition || w.webkitSpeechRecognition))
+    setNativeAndroid(isNativeAndroid())
+    setBrowserInput(!isNativeAndroid() && !!(w.SpeechRecognition || w.webkitSpeechRecognition))
     setCanRecord(window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined')
     const updateOnline = () => setOnline(navigator.onLine)
     updateOnline()
     window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline)
-    const suspend = () => { stopGeneration(); cancelRecording(); stopAudio() }
+    const suspend = () => {
+      // Android's system permission dialog can briefly pause the activity.
+      if (nativePermissionPending.current) return
+      stopGeneration(); cancelRecording(); stopAudio()
+    }
     const onVisibility = () => { if (document.hidden) suspend() }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pagehide', suspend)
@@ -112,9 +121,14 @@ export function useVoiceSession() {
   }, [])
 
   const matchingVoice = (language: ReplyLanguage) => voices.find(voice => voice.lang.toLowerCase().startsWith(language))
-  const inputEngine = engine === 'auto' ? canRecord && !cloudInputFailed && (isNative() || capabilities?.transcription || browserInputFailed || !browserInput) ? 'cloud' : browserInput && !browserInputFailed ? 'browser' : 'cloud' : engine
+  const inputEngine = selectInputEngine({ engine, nativeAndroid, canRecord, cloudAvailable: !!capabilities?.transcription, cloudFailed: cloudInputFailed, browserAvailable: browserInput, browserFailed: browserInputFailed })
   function retryCloud() { setCloudInputFailed(false); setCloudOutputFailed(false); setBrowserInputFailed(false); setFallbackInput(null); void refreshCapabilities() }
-  const outputEngine = engine === 'auto' ? capabilities?.speech && !cloudOutputFailed ? 'cloud' : matchingVoice(replyLanguage) ? 'browser' : 'cloud' : engine
+  const outputFor = (language: ReplyLanguage) => selectOutputEngine({ engine, nativeAndroid, cloudAvailable: !!capabilities?.speech, cloudFailed: cloudOutputFailed, matchingVoice: !!matchingVoice(language) })
+  const outputEngine = outputFor(replyLanguage)
+  async function openPermissionSettings() {
+    try { await openMicrophoneSettings() }
+    catch (error) { setNotice(microphoneError(error)) }
+  }
 
   function playPrepared() {
     const audio = resources.current.audio
@@ -147,7 +161,7 @@ export function useVoiceSession() {
         if (token !== playback.current) return
         if (selected === 'cloud') setCloudOutputFailed(true)
         const next = selected === 'cloud' ? 'browser' : 'cloud'
-        if (engine === 'auto' && !attempted.has(next) && (next === 'cloud' ? navigator.onLine : !!matchingVoice(message.language))) {
+        if (engine === 'auto' && !attempted.has(next) && (next === 'cloud' ? navigator.onLine : !nativeAndroid && !!matchingVoice(message.language))) {
           resources.current.audio?.pause()
           if (resources.current.url) URL.revokeObjectURL(resources.current.url)
           resources.current.audio = undefined; resources.current.url = undefined
@@ -192,8 +206,7 @@ export function useVoiceSession() {
         }
       } catch (error) { await fallback(error) }
     }
-    const selected = engine === 'auto' ? capabilities?.speech && !cloudOutputFailed ? 'cloud' : matchingVoice(message.language) ? 'browser' : 'cloud' : engine
-    await run(selected)
+    await run(outputFor(message.language))
   }
 
   function finishRecording() {
@@ -204,9 +217,9 @@ export function useVoiceSession() {
   }
 
   async function startRecording(override?: 'cloud' | 'browser') {
-    if (sending.current || captureBusy.current) return
+    if (sending.current || captureBusy.current || nativePermissionPending.current) return
     captureBusy.current = true
-    const selectedInput = override ?? inputEngine
+    const selectedInput = isNativeAndroid() ? 'cloud' : override ?? inputEngine
     stopAudio(); setNotice(''); setSeconds(0); setFallbackInput(null); setStatus('requesting')
     const token = ++recording.current
     const existing = draft.trim()
@@ -218,8 +231,12 @@ export function useVoiceSession() {
     }
     try {
       if (selectedInput === 'cloud' && !navigator.onLine) throw new Error('Cloud recording needs a connection. Your draft remains available for editing.')
-      await requestNativeMicrophone()
+      nativePermissionPending.current = isNativeAndroid()
+      try { await requestNativeMicrophone() }
+      finally { nativePermissionPending.current = false }
       if (token !== recording.current) return
+      if (document.hidden) { cancelRecording(); return }
+      setPermissionDenied(false)
       if (selectedInput === 'browser') {
         const w = window as SpeechWindow
         const Constructor = w.SpeechRecognition || w.webkitSpeechRecognition
@@ -237,6 +254,7 @@ export function useVoiceSession() {
           recording.current++; captureBusy.current = false
           recognition.abort(); resources.current.recognition = undefined
           clearTimers(); setStatus('idle'); setBrowserInputFailed(true)
+          if (['not-allowed', 'service-not-allowed'].includes(event.error)) setPermissionDenied(true)
           if (engine === 'auto' && canRecord && !['not-allowed', 'service-not-allowed'].includes(event.error)) setFallbackInput('cloud')
           setNotice(event.error === 'not-allowed' ? 'Microphone permission was denied. Allow microphone access in your browser, or type below. Embedded previews may require opening the app in a new tab.' : 'Browser recognition could not hear you. Try again, switch to Cloud speech, or type your message.')
         }
@@ -255,8 +273,9 @@ export function useVoiceSession() {
       recorder.ondataavailable = event => { if (event.data.size) { chunks.push(event.data); size += event.data.size; if (size > 3_000_000 && recorder.state === 'recording') recorder.stop() } }
       recorder.onerror = () => { if (token === recording.current) { cancelRecording(); setNotice('Recording failed. Please try again or type your message.') } }
       recorder.onstop = async () => {
-        stream.getTracks().forEach(track => track.stop()); clearTimers()
+        stream.getTracks().forEach(track => track.stop())
         if (token !== recording.current) return
+        clearTimers()
         setStatus('transcribing')
         try {
           const mimeType = recorder.mimeType || chunks.find(chunk => chunk.type)?.type || ''
@@ -277,6 +296,7 @@ export function useVoiceSession() {
       if (token !== recording.current) return
       captureBusy.current = false
       clearTimers(); resources.current.stream?.getTracks().forEach(track => track.stop()); setStatus('idle')
+      if (error instanceof MicrophoneDeniedError || (error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name))) setPermissionDenied(true)
       setNotice(microphoneError(error))
     }
   }
@@ -327,7 +347,7 @@ export function useVoiceSession() {
     } finally { if (token === session.current) sending.current = false }
   }
 
-  return { online, capabilityError, retryCloud, preparedId, playPrepared, fallbackInput, inputLanguage, setInputLanguage, replyLanguage, setReplyLanguage, engine, setEngine, autoPlay, setAutoPlay, speed, setSpeed, draft, setDraft, messages, status, notice, setNotice, browserInput, canRecord, voices, seconds, activeEngine, playingId, capabilities, checkingCloud, inputEngine, outputEngine, cloudInputFailed, cloudOutputFailed, send, speak, startRecording, finishRecording, cancelRecording, stopAudio, stopGeneration, reset }
+  return { nativeAndroid, permissionDenied, openPermissionSettings, online, capabilityError, retryCloud, preparedId, playPrepared, fallbackInput, inputLanguage, setInputLanguage, replyLanguage, setReplyLanguage, engine, setEngine, autoPlay, setAutoPlay, speed, setSpeed, draft, setDraft, messages, status, notice, setNotice, browserInput, canRecord, voices, seconds, activeEngine, playingId, capabilities, checkingCloud, inputEngine, outputEngine, cloudInputFailed, cloudOutputFailed, send, speak, startRecording, finishRecording, cancelRecording, stopAudio, stopGeneration, reset }
 }
 
 export type VoiceSession = ReturnType<typeof useVoiceSession>

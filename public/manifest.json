@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "Mozhi — Tamil, English & Tanglish",
+  "short_name": "Mozhi",
+  "description": "Speak or type in Tamil, English, or Tanglish. An internet connection is required for cloud conversations.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f8f7",
+  "theme_color": "#f6f8f7",
+  "lang": "en",
+  "icons": [
+    { "src": "/icons/mozhi-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/mozhi-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/mozhi-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

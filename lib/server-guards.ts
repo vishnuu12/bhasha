@@ -1,11 +1,11 @@
+import { allowedOrigin } from './origins'
+
 export class RequestError extends Error {
   constructor(message: string, public status = 400) { super(message) }
 }
 
 export function verifyRequest(request: Request) {
-  const origin = request.headers.get('origin')
-  const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host')
-  if (!origin || new URL(origin).host !== host) throw new RequestError('This request must come from the app.', 403)
+  if (!allowedOrigin(request)) throw new RequestError('This request must come from the app.', 403)
 }
 
 export async function boundedBody(request: Request, maxBytes: number) {

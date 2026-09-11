@@ -3,7 +3,7 @@
 import { AudioLines, Info, Plus, ShieldCheck, X } from 'lucide-react'
 import { useVoiceSession } from '@/hooks/use-voice-session'
 import { Button } from '@/components/ui/button'
-import { Alert, AlertAction, AlertDescription } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { VoicePanel, ConversationStarters } from '@/components/voice-panel'
 import { ConversationPanel } from '@/components/conversation-panel'
@@ -23,6 +23,7 @@ export function VoiceChat() {
         <div className="flex flex-col gap-2"><p className="text-sm font-medium text-primary">LESS TYPING. MORE YOU.</p><h1 className="text-balance text-3xl font-medium tracking-tight sm:text-4xl">Good conversations start naturally.</h1><p className="text-pretty text-sm leading-relaxed text-muted-foreground sm:text-base">Speak your mind. We&apos;ll find the words together.</p></div>
         <Dialog><DialogTrigger render={<Button variant="outline" />}><Plus data-icon="inline-start" />New conversation</DialogTrigger><DialogContent><DialogHeader><DialogTitle>Start fresh?</DialogTitle><DialogDescription>This clears the current conversation and any draft. Nothing is saved, so this cannot be undone.</DialogDescription></DialogHeader><DialogFooter><DialogClose render={<Button variant="outline" />}>Keep chatting</DialogClose><DialogClose render={<Button onClick={voice.reset} />}>Start new conversation</DialogClose></DialogFooter></DialogContent></Dialog>
       </div>
+      {voice.permissionDenied && <Alert><Info /><AlertTitle>Microphone access is blocked.</AlertTitle><AlertDescription><p>{voice.nativeAndroid ? 'Allow microphone access in Android Settings, then return and tap the mic again.' : 'Allow microphone access in your browser’s site settings, then tap the mic again. On iOS, check Settings → Apps → Safari → Microphone. You can always type below.'}</p><div className="flex flex-wrap gap-2">{voice.nativeAndroid && <Button variant="outline" onClick={() => void voice.openPermissionSettings()}>Open Android settings</Button>}<Button variant="outline" onClick={() => document.getElementById('message')?.focus()}>Type instead</Button></div></AlertDescription></Alert>}
       {voice.notice && <Alert><Info /><AlertDescription>{voice.notice}</AlertDescription><AlertAction><Button variant="ghost" size="icon-sm" onClick={() => voice.setNotice('')} aria-label="Dismiss notification"><X /></Button></AlertAction></Alert>}
       {(!voice.online || voice.capabilityError) && <Alert><Info /><AlertDescription>{!voice.online ? 'You are offline. You can edit your draft, but cloud services need a connection. Drafts are not saved after closing the app.' : 'Backend availability could not be checked. Check your connection or retry.'}<Button variant="outline" disabled={!voice.online} onClick={voice.retryCloud}>Retry connection</Button></AlertDescription></Alert>}
       {(voice.preparedId || voice.fallbackInput) && <div className="flex flex-wrap gap-3">
