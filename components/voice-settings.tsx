@@ -18,19 +18,20 @@ export function VoiceSettings({ voice }: { voice: VoiceSession }) {
       <FieldGroup>
         <Field><FieldLabel id="engine-label">Speech engine</FieldLabel>
           <ToggleGroup aria-labelledby="engine-label" value={[voice.engine]} onValueChange={values => { if (values[0]) { voice.stopAudio(); voice.setEngine(values[0] as SpeechEngine) } }} variant="outline" className="flex-wrap" disabled={locked}>
-            <ToggleGroupItem value="auto"><Sparkles /> Auto</ToggleGroupItem><ToggleGroupItem value="cloud"><Cloud /> Cloud</ToggleGroupItem><ToggleGroupItem value="browser"><Laptop /> Browser</ToggleGroupItem>
+            <ToggleGroupItem value="auto"><Sparkles /> Auto</ToggleGroupItem><ToggleGroupItem value="cloud"><Cloud /> Cloud</ToggleGroupItem><ToggleGroupItem value="browser" disabled={voice.nativeAndroid}><Laptop /> Browser</ToggleGroupItem>
           </ToggleGroup>
+          {voice.nativeAndroid && <FieldDescription>Android uses cloud transcription and voice playback. WebView browser speech is unreliable, so browser mode is unavailable here. If cloud speech fails, retry or use text.</FieldDescription>}
           <FieldDescription>Auto selects input and output independently. Cloud access is confirmed on use; if transcription fails, switch engines and re-record. You can always edit your draft; sending requires connectivity.</FieldDescription>
         </Field>
         <Field><FieldLabel id="speed-label">Speaking speed</FieldLabel><ToggleGroup aria-labelledby="speed-label" value={[String(voice.speed)]} onValueChange={values => { if (values[0]) { voice.stopAudio(); voice.setSpeed(Number(values[0])) } }} variant="outline" className="flex-wrap" disabled={locked}><ToggleGroupItem value="0.85">Relaxed</ToggleGroupItem><ToggleGroupItem value="1">Natural</ToggleGroupItem><ToggleGroupItem value="1.15">A little faster</ToggleGroupItem></ToggleGroup></Field>
         <Separator />
         <div className="flex flex-col gap-3 text-sm"><h3 className="font-medium">On this browser</h3>
           <dl className="flex flex-col gap-2">
-            <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Browser recognition</dt><dd>{voice.browserInput ? 'Supported' : 'Not supported'}</dd></div>
-            <div className="flex justify-between gap-3"><dt className="text-muted-foreground">English voice</dt><dd>{englishVoice ? 'Installed' : 'Not installed'}</dd></div>
-            <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Tamil voice</dt><dd>{tamilVoice ? 'Installed' : 'Not installed'}</dd></div>
-            <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Cloud transcription</dt><dd>{voice.cloudInputFailed ? 'Last request failed' : voice.capabilities?.transcription ? 'Listed · access on use' : voice.checkingCloud ? 'Checking…' : 'Unconfirmed'}</dd></div>
-            <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Cloud voice</dt><dd>{voice.cloudOutputFailed ? 'Last request failed' : voice.capabilities?.speech ? 'Listed · access on use' : voice.checkingCloud ? 'Checking…' : 'Unconfirmed'}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">Browser recognition</dt><dd>{voice.browserInput ? 'Supported' : 'Not supported'}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">English voice</dt><dd>{englishVoice ? 'Installed' : 'Not installed'}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">Tamil voice</dt><dd>{tamilVoice ? 'Installed' : 'Not installed'}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">Cloud transcription</dt><dd>{voice.cloudInputFailed ? 'Last request failed' : voice.capabilities?.transcription ? 'Listed · access on use' : voice.checkingCloud ? 'Checking…' : 'Unconfirmed'}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">Cloud voice</dt><dd>{voice.cloudOutputFailed ? 'Last request failed' : voice.capabilities?.speech ? 'Listed · access on use' : voice.checkingCloud ? 'Checking…' : 'Unconfirmed'}</dd></div>
           </dl>
           <Button variant="outline" disabled={locked || !voice.online} onClick={voice.retryCloud}>Retry cloud availability</Button>
           <p className="leading-relaxed text-muted-foreground">Tanglish is mixed Tamil and English, not a separate recognition locale. Browser mode uses a Tamil hint for mixed speech; results vary. Review your transcript before sending.</p>
